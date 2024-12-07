@@ -5,3 +5,5 @@ diffusers
 opencv-python
 pillow
 matplotlib
+pytorch-fid
+tensorflow
