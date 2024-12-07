@@ -1,52 +1,54 @@
-import torch
-from transformers import CLIPTextModel, CLIPTokenizer
 from diffusers import StableDiffusionPipeline
-from PIL import Image
+import torch
 import matplotlib.pyplot as plt
-import numpy as np
-import cv2
+import os
+from realesrgan import RealESRGAN
+from PIL import Image
 
-pipe=StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", torch_dtype=torch.float16)
+# Initialize the Stable Diffusion model
+pipe = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4-original", torch_dtype=torch.float16)
 pipe.to("cuda")
 
-def generate_image_from_text(prompt: str):
-   with torch.no_grad():
-      image = pipe(prompt).images[0]
-      return image 
-def save_and_display_image(image: Image.Image, filename: str):
-   image.save(filename)
+# Initialize RealESRGAN for image upscaling
+esrgan_model = RealESRGAN.from_pretrained('RealESRGAN_x4')
+esrgan_model = esrgan_model.to('cuda')
 
-   plt.imshow(image)
-   plt.axis("off")
-   plt.show()
+# Function to generate an image from a text prompt
+def generate_image_from_prompt(prompt):
+    # Generate image using the Stable Diffusion model
+    image = pipe(prompt).images[0]
+    
+    # Enhance image using ESRGAN (optional)
+    upscaled_image = esrgan_model.predict(image)
 
-prompt = "A futuristic city at sunset with flying cars."
-generated_image = generate_image_from_text(prompt)
-save_and_display_image(generated_image, "generated_image.png")
+    # Save the image
+    sanitized_prompt = prompt.replace(" ", "_")[:50]  # Avoid long filenames
+    filename = f"{sanitized_prompt}.png"
+    upscaled_image.save(filename)
 
-def enhance_image(image_path: str):
-   img = cv2.imread(image_path)
+    # Display the upscaled image
+    plt.imshow(upscaled_image)
+    plt.axis('off')
+    plt.title(f"Generated Image for: {prompt}")
+    plt.show()
 
-   enhanced_image = cv2.resize(img, (img.shape[1] * 2, img.shape[0] * 2), interpolation=cv2.INTER_CUBIC)
-   
-   enhanced_pil_img = Image.fromarray(enhanced_image)
+    return filename
 
-   return enhanced_pil_img
+# List of diverse text prompts to test
+prompts = [
+    "A close-up of a red apple on a white plate.",
+    "A futuristic city skyline at sunset with flying cars.",
+    "A serene landscape with mountains and a lake during sunrise.",
+    "A vintage car parked in front of an old brick building.",
+    "A cat wearing a spacesuit on the moon.",
+    "A portrait of a woman in the style of Picasso.",
+    "A chaotic swirl of colors.",
+    "A dragon flying over a medieval castle.",
+    "A beautiful beach at sunset with waves crashing."
+]
 
-enhanced_image = enhance_image("generated_image.png")
-save_and_display_image(enhanced_image, "enhanced_image.png")
-
-def compare_multiple_outputs(prompt: str, num_samples: int = 5):
-   images = []
-   for i in range(num_samples):
-      img = generate_image_from_text(prompt)
-      images.append(img)
-
-   fig, axes = plt.subplots(1, num_samples, figsize=(15, 5))
-   for i, ax in enumerate(axes):
-    ax.imshow(images[i])
-    ax.axis("off")
-plt.show()
-
-compare_multiple_outputs("A beautiful forest landscape at dawn", num_samples=5)
-   
+# Generate and save images for each prompt, then display them
+for prompt in prompts:
+    print(f"Generating image for: {prompt}")
+    generated_image = generate_image_from_prompt(prompt)
+    print(f"Saved generated image: {generated_image}")
