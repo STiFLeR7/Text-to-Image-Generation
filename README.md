@@ -56,13 +56,14 @@ cd text-to-image-generation
 ```python text_to_image.py```
 
 The script will:
-    Generate images for multiple diverse prompts.
 
-    Enhance the generated images using Real-ESRGAN.
+Generate images for multiple diverse prompts.
 
-    Save the generated images with filenames based on the prompt.
+Enhance the generated images using Real-ESRGAN.
 
-    Display the images using Matplotlib for visual inspection.
+Save the generated images with filenames based on the prompt.
+
+Display the images using Matplotlib for visual inspection.
 
 2. **Evaluate Image Quality Using Inception Score (IS)**
 
