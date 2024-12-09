@@ -1,93 +1,117 @@
-import os
 import torch
+from torch.utils.data import DataLoader
 from transformers import CLIPTextModel, CLIPTokenizer
-from diffusers import StableDiffusionPipeline, DDPMScheduler
-from torch.utils.data import DataLoader, Dataset
+from diffusers import UNet2DConditionModel, DDPMScheduler, StableDiffusionPipeline
+from torchvision import transforms
 from PIL import Image
+import os
 
-# Paths
-DATASET_DIR = "D:/Text-to-Image-Generation/preprocessed_data"
-ANNOTATIONS_FILE = "D:/Flickr8k-Dataset/Flickr8k_text/Flickr8k.token.txt"
-MODEL_SAVE_PATH = "D:/Text-to-Image-Generation/model_checkpoints"
+# Set device to GPU if available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Dataset Class
-class Flickr8kDataset(Dataset):
-    def __init__(self, annotations_file, image_dir, transform=None):
+# Define paths
+DATASET_DIR = "D:/Flickr8k-Dataset/Flicker8k_Dataset"  # Update this path to your dataset's image folder
+ANNOTATIONS_FILE = "D:/Flickr8k-Dataset/Flickr8k_text/Flickr8k.token.txt"  # File containing captions
+CHECKPOINT_PATH = "D:/Text-to-Image-Generation/model_checkpoints"  # Path for model checkpoints
+
+# Read captions
+with open(ANNOTATIONS_FILE, 'r') as file:
+    captions = file.readlines()
+
+# Define image transformation
+transform = transforms.Compose([
+    transforms.Resize((512, 512)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+])
+
+# Define custom Dataset class for loading images and captions
+class Flickr8kDataset(torch.utils.data.Dataset):
+    def __init__(self, image_dir, captions, transform=None):
         self.image_dir = image_dir
-        self.captions = []
-        self.image_names = []
-        
-        with open(annotations_file, "r") as f:
-            for line in f:
-                parts = line.strip().split("\t")
-                image_name, caption = parts[0].split("#")[0], parts[1]
-                self.image_names.append(image_name)
-                self.captions.append(caption)
+        self.captions = captions
+        self.transform = transform
 
     def __len__(self):
         return len(self.captions)
 
     def __getitem__(self, idx):
-        image_path = os.path.join(self.image_dir, self.image_names[idx])
-        image = Image.open(image_path).convert("RGB")
-        caption = self.captions[idx]
-        return image, caption
+        # Get image filename and caption
+        img_name = self.captions[idx].split()[0]
+        caption = " ".join(self.captions[idx].split()[1:]).strip()
 
-# Fine-Tuning Function
-def fine_tune_model():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Load image
+        img_path = os.path.join(self.image_dir, img_name)
+        img = Image.open(img_path).convert("RGB")
 
-    # Load Dataset
-    dataset = Flickr8kDataset(ANNOTATIONS_FILE, DATASET_DIR)
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+        # Apply transformation
+        if self.transform:
+            img = self.transform(img)
 
-    # Load Pretrained Model
-    model_name = "runwayml/stable-diffusion-v1-5"
-    pipeline = StableDiffusionPipeline.from_pretrained(model_name)
-    pipeline.to(device)
+        return img, caption
 
-    # Optimizer and Scheduler
-    optimizer = torch.optim.AdamW(pipeline.unet.parameters(), lr=5e-6)
-    noise_scheduler = DDPMScheduler(num_train_timesteps=1000)
+# Initialize dataset and dataloader
+train_dataset = Flickr8kDataset(DATASET_DIR, captions, transform)
+train_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True)
 
-    # Training Loop
-    for epoch in range(3):  # Adjust as needed
-        print(f"Epoch {epoch + 1}")
-        for step, (image, caption) in enumerate(dataloader):
-            optimizer.zero_grad()
+# Load pre-trained Stable Diffusion pipeline
+pipe = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", revision="fp16", torch_dtype=torch.float16).to(device)
 
-            # Preprocess inputs
-            image = image[0].resize((256, 256))
-            image_tensor = pipeline.feature_extractor(image, return_tensors="pt").pixel_values.to(device)
+# Set up optimizer (use AdamW for fine-tuning)
+optimizer = torch.optim.AdamW(pipe.unet.parameters(), lr=5e-6)
 
-            # Generate Latents
-            latents = pipeline.vae.encode(image_tensor).latent_dist.sample()
-            latents = latents * 0.18215
+# Initialize learning rate scheduler (optional, if you want to use learning rate scheduler)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
-            # Tokenize captions
-            tokenizer = CLIPTokenizer.from_pretrained(model_name)
-            text_input = tokenizer(caption, padding="max_length", max_length=77, truncation=True, return_tensors="pt")
-            text_embeddings = pipeline.text_encoder(text_input.input_ids.to(device))[0]
+# Training loop
+for epoch in range(5):  # Number of epochs
+    print(f"Epoch {epoch + 1}/5")
+    for batch_idx, (images, captions) in enumerate(train_dataloader):
+        images = images.to(device)
+        captions = list(captions)
 
-            # Add noise
-            noise = torch.randn_like(latents)
-            timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (1,), device=device).long()
-            noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+        # Tokenize captions
+        text_inputs = pipe.tokenizer(
+            captions,
+            padding="max_length",
+            max_length=pipe.tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt"
+        )
+        input_ids = text_inputs.input_ids.to(device)
 
-            # Predict noise
-            noise_pred = pipeline.unet(noisy_latents, timesteps, encoder_hidden_states=text_embeddings).sample
+        # Forward pass
+        latents = pipe.vae.encode(images).latent_dist.sample().detach()
+        latents = latents * 0.18215  # Scaling factor for latents
 
-            # Compute Loss
-            loss = torch.nn.functional.mse_loss(noise_pred, noise)
-            loss.backward()
-            optimizer.step()
+        noise = torch.randn_like(latents).to(device)
+        timesteps = torch.randint(0, pipe.scheduler.num_train_timesteps, (1,), device=device).long()
 
-            if step % 10 == 0:
-                print(f"Step {step}: Loss = {loss.item()}")
+        noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
 
-    # Save Model
-    pipeline.save_pretrained(MODEL_SAVE_PATH)
-    print("Model fine-tuned and saved successfully.")
+        # Use `last_hidden_state` from text encoder
+        text_embeddings = pipe.text_encoder(input_ids).last_hidden_state
 
-if __name__ == "__main__":
-    fine_tune_model()
+        # Pass embeddings to the UNet
+        noise_pred = pipe.unet(noisy_latents, timesteps, encoder_hidden_states=text_embeddings).sample
+
+        # Loss calculation
+        loss = torch.nn.functional.mse_loss(noise_pred, noise)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        # Update scheduler
+        scheduler.step()
+
+        # Log progress every 10 batches
+        if batch_idx % 10 == 0:
+            print(f"Batch {batch_idx}/{len(train_dataloader)} - Loss: {loss.item()}")
+
+    # Save model checkpoint after each epoch
+    checkpoint_path = os.path.join(CHECKPOINT_PATH, f"model_epoch_{epoch+1}.pth")
+    torch.save(pipe.state_dict(), checkpoint_path)
+    print(f"Checkpoint saved to {checkpoint_path}")
+
+print("Fine-tuning complete!")
