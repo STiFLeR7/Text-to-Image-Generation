@@ -86,7 +86,10 @@ optimizer = AdamW(
 # Training loop
 for epoch in range(NUM_EPOCHS):
     epoch_loss = 0
-    pipe.train()  # Set pipeline to training mode
+    # Set the components to training mode
+    pipe.unet.train()
+    pipe.vae.train()
+    pipe.text_encoder.train()
 
     # Loop over the dataloader with batch_idx to accumulate gradients
     for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Epoch {epoch + 1}/{NUM_EPOCHS}")):
