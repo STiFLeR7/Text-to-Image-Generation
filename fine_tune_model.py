@@ -1,32 +1,20 @@
-import torch
-from torch.utils.data import DataLoader
-from transformers import CLIPTextModel, CLIPTokenizer
-from diffusers import UNet2DConditionModel, DDPMScheduler, StableDiffusionPipeline
-from torchvision import transforms
-from PIL import Image
 import os
+import json
+from PIL import Image
+from tqdm import tqdm
+import torch
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from transformers import AutoTokenizer, AutoModelForCausalLM, AdamW
+from transformers import get_scheduler
 
-# Set device to GPU if available
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Paths
+DATASET_DIR = "D:/Flickr8k-Dataset/Flicker8k_Dataset"
+CAPTIONS_FILE = "D:/Text-to-Image-Generation/processed_captions.json"
+CHECKPOINT_DIR = "D:/Text-to-Image-Generation/model_checkpoints"
 
-# Define paths
-DATASET_DIR = "D:/Flickr8k-Dataset/Flicker8k_Dataset"  # Update this path to your dataset's image folder
-ANNOTATIONS_FILE = "D:/Flickr8k-Dataset/Flickr8k_text/Flickr8k.token.txt"  # File containing captions
-CHECKPOINT_PATH = "D:/Text-to-Image-Generation/model_checkpoints"  # Path for model checkpoints
-
-# Read captions
-with open(ANNOTATIONS_FILE, 'r') as file:
-    captions = file.readlines()
-
-# Define image transformation
-transform = transforms.Compose([
-    transforms.Resize((512, 512)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-])
-
-# Define custom Dataset class for loading images and captions
-class Flickr8kDataset(torch.utils.data.Dataset):
+# Dataset class
+class Flickr8kDataset(Dataset):
     def __init__(self, image_dir, captions, transform=None):
         self.image_dir = image_dir
         self.captions = captions
@@ -36,12 +24,13 @@ class Flickr8kDataset(torch.utils.data.Dataset):
         return len(self.captions)
 
     def __getitem__(self, idx):
-        # Get image filename and caption
-        img_name = self.captions[idx].split()[0]
-        caption = " ".join(self.captions[idx].split()[1:]).strip()
+        image_id = list(self.captions.keys())[idx]
+        caption = self.captions[image_id][0]  # Use the first caption for simplicity
 
         # Load image
-        img_path = os.path.join(self.image_dir, img_name)
+        img_path = os.path.join(self.image_dir, image_id)
+        if not os.path.exists(img_path):
+            raise FileNotFoundError(f"Image not found: {img_path}")
         img = Image.open(img_path).convert("RGB")
 
         # Apply transformation
@@ -50,68 +39,65 @@ class Flickr8kDataset(torch.utils.data.Dataset):
 
         return img, caption
 
-# Initialize dataset and dataloader
-train_dataset = Flickr8kDataset(DATASET_DIR, captions, transform)
-train_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True)
+# Training function
+def train_model(dataset_dir, captions_file, checkpoint_dir, num_epochs=5, batch_size=1):
+    # Load captions
+    with open(captions_file, "r") as f:
+        captions = json.load(f)
 
-# Load pre-trained Stable Diffusion pipeline
-pipe = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", revision="fp16", torch_dtype=torch.float16).to(device)
+    # Define transforms
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
 
-# Set up optimizer (use AdamW for fine-tuning)
-optimizer = torch.optim.AdamW(pipe.unet.parameters(), lr=5e-6)
+    # Prepare dataset and dataloader
+    dataset = Flickr8kDataset(dataset_dir, captions, transform=transform)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-# Initialize learning rate scheduler (optional, if you want to use learning rate scheduler)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+    # Load model and tokenizer
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    model = AutoModelForCausalLM.from_pretrained("gpt2")
 
-# Training loop
-for epoch in range(5):  # Number of epochs
-    print(f"Epoch {epoch + 1}/5")
-    for batch_idx, (images, captions) in enumerate(train_dataloader):
-        images = images.to(device)
-        captions = list(captions)
+    # Add a padding token to the tokenizer
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+        model.resize_token_embeddings(len(tokenizer))
 
-        # Tokenize captions
-        text_inputs = pipe.tokenizer(
-            captions,
-            padding="max_length",
-            max_length=pipe.tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt"
-        )
-        input_ids = text_inputs.input_ids.to(device)
+    # Move model to GPU if available
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
 
-        # Forward pass
-        latents = pipe.vae.encode(images).latent_dist.sample().detach()
-        latents = latents * 0.18215  # Scaling factor for latents
+    # Define optimizer and scheduler
+    optimizer = AdamW(model.parameters(), lr=5e-5)
+    scheduler = get_scheduler("linear", optimizer=optimizer, num_warmup_steps=0, num_training_steps=len(dataloader) * num_epochs)
 
-        noise = torch.randn_like(latents).to(device)
-        timesteps = torch.randint(0, pipe.scheduler.num_train_timesteps, (1,), device=device).long()
+    # Training loop
+    model.train()
+    for epoch in range(num_epochs):
+        print(f"Epoch {epoch + 1}/{num_epochs}")
+        for batch_idx, (images, captions) in enumerate(tqdm(dataloader)):
+            images = images.to(device)
+            inputs = tokenizer(captions, return_tensors="pt", padding=True, truncation=True).to(device)
 
-        noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
+            # Forward pass
+            outputs = model(**inputs, labels=inputs["input_ids"])
+            loss = outputs.loss
 
-        # Use `last_hidden_state` from text encoder
-        text_embeddings = pipe.text_encoder(input_ids).last_hidden_state
+            # Backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
 
-        # Pass embeddings to the UNet
-        noise_pred = pipe.unet(noisy_latents, timesteps, encoder_hidden_states=text_embeddings).sample
+            if batch_idx % 100 == 0:
+                print(f"Batch {batch_idx}/{len(dataloader)} - Loss: {loss.item()}")
 
-        # Loss calculation
-        loss = torch.nn.functional.mse_loss(noise_pred, noise)
+        # Save checkpoint
+        checkpoint_path = os.path.join(checkpoint_dir, f"model_epoch_{epoch + 1}.pt")
+        torch.save(model.state_dict(), checkpoint_path)
+        print(f"Checkpoint saved to {checkpoint_path}")
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        # Update scheduler
-        scheduler.step()
-
-        # Log progress every 10 batches
-        if batch_idx % 10 == 0:
-            print(f"Batch {batch_idx}/{len(train_dataloader)} - Loss: {loss.item()}")
-
-    # Save model checkpoint after each epoch
-    checkpoint_path = os.path.join(CHECKPOINT_PATH, f"model_epoch_{epoch+1}.pth")
-    torch.save(pipe.state_dict(), checkpoint_path)
-    print(f"Checkpoint saved to {checkpoint_path}")
-
-print("Fine-tuning complete!")
+if __name__ == "__main__":
+    train_model(DATASET_DIR, CAPTIONS_FILE, CHECKPOINT_DIR)
