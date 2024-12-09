@@ -1,122 +1,94 @@
+
+import os
 import torch
 from torch.utils.data import DataLoader
 from transformers import CLIPTextModel, CLIPTokenizer
-from diffusers import StableDiffusionPipeline, UNet2DConditionModel, AutoencoderKL
-from torch.cuda.amp import autocast, GradScaler
-from torch.optim import AdamW
-import os
-from PIL import Image
-from torchvision import transforms
+from diffusers import DiffusionPipeline
+
+from datasets import load_dataset
 
 # Constants
-BATCH_SIZE = 1  # Small batch size for memory efficiency
-NUM_EPOCHS = 5
-LR = 1e-5  # Learning rate
-ACCUMULATE_GRADIENTS = 4  # Gradient accumulation steps
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+COCO_IMAGE_DIR = "D:/COCO-Dataset/train2014/train2014"
+COCO_CAPTIONS_FILE = "D:/COCO-Dataset/annotations_trainval2014/annotations/captions_train2014.json"
+OUTPUT_DIR = "fine_tuned_model"
+BATCH_SIZE = 1
+EPOCHS = 1
+LR = 5e-6
+DEVICE = "cpu" if not torch.cuda.is_available() else "cuda"
 
-def load_dataset(dataset_dir):
-    """Load image file paths from the dataset directory."""
-    image_paths = []
-    for root, _, files in os.walk(dataset_dir):
-        for file in files:
-            if file.endswith('.jpg') or file.endswith('.png'):
-                image_paths.append(os.path.join(root, file))
-    return image_paths
-
-class CustomDataset(torch.utils.data.Dataset):
-    """Custom Dataset class for images and their captions."""
-    def __init__(self, image_paths, transform=None):
-        self.image_paths = image_paths
+# Dataset
+class COCODataset(torch.utils.data.Dataset):
+    def __init__(self, image_dir, captions_file, transform=None):
+        from pycocotools.coco import COCO
+        self.coco = COCO(captions_file)
+        self.image_dir = image_dir
         self.transform = transform
-    
+        self.image_ids = list(self.coco.imgs.keys())
+
     def __len__(self):
-        return len(self.image_paths)
-    
+        return len(self.image_ids)
+
     def __getitem__(self, idx):
-        image_path = self.image_paths[idx]
-        image = Image.open(image_path).convert("RGB")
-        if self.transform:
-            image = self.transform(image)
-        return {"image": image, "text": "sample caption"}  # Replace with actual captions
+        img_id = self.image_ids[idx]
+        img_info = self.coco.loadImgs(img_id)[0]
+        img_path = os.path.join(self.image_dir, img_info['file_name'])
 
-def main():
-    # Load components of Stable Diffusion
-    pipeline = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", revision="fp16", torch_dtype=torch.float16)
-    vae = pipeline.vae.to(DEVICE)
-    text_encoder = pipeline.text_encoder.to(DEVICE)
-    tokenizer = pipeline.tokenizer
-    unet = pipeline.unet.to(DEVICE)
+        caption_data = self.coco.loadAnns(self.coco.getAnnIds(imgIds=img_id))
+        captions = [ann['caption'] for ann in caption_data]
 
-    # Optimizer for UNet
-    optimizer = AdamW(unet.parameters(), lr=LR)
+        try:
+            from PIL import Image
+            image = Image.open(img_path).convert("RGB")
+            if self.transform:
+                image = self.transform(image)
+        except Exception as e:
+            print(f"Error loading image {img_path}: {e}")
+            return None
 
-    # Gradient scaler for mixed precision
-    scaler = GradScaler()
+        return image, captions[0] if captions else ""
 
-    # Image preprocessing
-    transform = transforms.Compose([
-        transforms.Resize((256, 256)),  # Resize images to save memory
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5])  # Normalize to [-1, 1]
-    ])
+# Initialize Dataset and DataLoader
+dataset = COCODataset(COCO_IMAGE_DIR, COCO_CAPTIONS_FILE)
+dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-    # Dataset directory
-    dataset_dir = "D:/COCO-Dataset/train2014/train2014"
-    image_paths = load_dataset(dataset_dir)
-    dataset = CustomDataset(image_paths, transform)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)  # Use num_workers=0 for Windows
+# Model setup
+tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
+text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32")
+pipeline = DiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", revision="fp16", torch_dtype=torch.float16).to(DEVICE)
 
-    # Training loop
-    for epoch in range(NUM_EPOCHS):
-        unet.train()
-        epoch_loss = 0
-        for batch_idx, batch in enumerate(dataloader):
-            images = batch["image"].to(DEVICE).half()  # Convert to float16
-            texts = batch["text"]
+optimizer = torch.optim.AdamW(pipeline.unet.parameters(), lr=LR)
+scaler = torch.cuda.amp.GradScaler() if DEVICE == "cuda" else None
 
-            # Tokenize text
-            text_inputs = tokenizer(texts, padding="max_length", max_length=77, return_tensors="pt", truncation=True)
-            input_ids = text_inputs.input_ids.to(DEVICE)
+# Training loop
+for epoch in range(EPOCHS):
+    for batch_idx, (images, captions) in enumerate(dataloader):
+        if images is None: continue  # Skip invalid data
 
-            # Encode text
-            encoder_hidden_states = text_encoder(input_ids)[0]
+        images = images.to(DEVICE)
+        inputs = tokenizer(captions, padding="max_length", return_tensors="pt").to(DEVICE)
+        text_embeddings = text_encoder(**inputs).last_hidden_state
 
-            # Encode images into latents
-            latents = vae.encode(images).latent_dist.sample() * 0.18215
+        with torch.autocast(device_type=DEVICE, dtype=torch.float16 if DEVICE == "cuda" else torch.float32):
+            latents = pipeline.vae.encode(images).latent_dist.sample()
+            latents = latents * pipeline.vae.config.scaling_factor
 
-            # Add noise to latents
-            noise = torch.randn_like(latents)
-            timesteps = torch.randint(0, 1000, (latents.size(0),), device=DEVICE).long()
+            noise = torch.randn_like(latents).to(DEVICE)
             noisy_latents = latents + noise
 
-            # Predict noise using UNet
-            with autocast():
-                noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
-                loss = torch.nn.functional.mse_loss(noise_pred, noise)
+            pred_noise = pipeline.unet(noisy_latents, text_embeddings).sample
+            loss = torch.nn.functional.mse_loss(pred_noise, noise)
 
-            # Backpropagation with gradient accumulation
+        optimizer.zero_grad()
+        if scaler:
             scaler.scale(loss).backward()
-            if (batch_idx + 1) % ACCUMULATE_GRADIENTS == 0:
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
 
-            epoch_loss += loss.item()
-            if batch_idx % 100 == 0:
-                print(f"Batch {batch_idx}/{len(dataloader)} - Loss: {loss.item()}")
+        if batch_idx % 10 == 0:
+            print(f"Epoch {epoch + 1}/{EPOCHS}, Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item()}")
 
-        print(f"Epoch {epoch + 1}/{NUM_EPOCHS} - Average Loss: {epoch_loss / len(dataloader)}")
-
-        # Save model checkpoint after each epoch
-        save_path = f"fine_tuned_model/epoch_{epoch + 1}"
-        os.makedirs(save_path, exist_ok=True)
-        unet.save_pretrained(save_path)
-
-        # Clear GPU memory
-        torch.cuda.empty_cache()
-
-    print("Fine-tuning complete.")
-
-if __name__ == "__main__":
-    main()
+# Save fine-tuned model
+pipeline.save_pretrained(OUTPUT_DIR)
