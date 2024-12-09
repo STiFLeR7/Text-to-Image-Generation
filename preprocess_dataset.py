@@ -1,27 +1,39 @@
 import os
-from PIL import Image
+import json
+from tqdm import tqdm
 
-DATASET_DIR = "D:/Flickr8k-Dataset/Flicker8k_Dataset"  # Path to Flickr8k images
-OUTPUT_DIR = "D:/Text-to-Image-Generation/preprocessed_data"  # Path for processed images
+DATASET_DIR = "D:/Flickr8k-Dataset/Flicker8k_Dataset"  # Path to the dataset images
+ANNOTATIONS_FILE = "D:/Flickr8k-Dataset/Flickr8k_text/Flickr8k.token.txt"  # Path to the captions file
+OUTPUT_FILE = "D:/Text-to-Image-Generation/processed_captions.json"  # Output path for processed captions
 
-def preprocess_images(dataset_dir, output_dir, target_size=(256, 256)):
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-        
-    processed_count = 0
-    for image_name in os.listdir(dataset_dir):
-        image_path = os.path.join(dataset_dir, image_name)
-        output_path = os.path.join(output_dir, image_name)
+def preprocess_flickr8k(dataset_dir, annotations_file, output_file):
+    # Load captions from annotations file
+    captions = {}
+    with open(annotations_file, "r") as f:
+        for line in tqdm(f.readlines(), desc="Processing captions"):
+            parts = line.strip().split("\t")
+            if len(parts) != 2:
+                continue
+            image_id, caption = parts
+            # Remove the #<number> suffix from the image ID
+            image_id = image_id.split("#")[0]
+            if image_id not in captions:
+                captions[image_id] = []
+            captions[image_id].append(caption)
 
-        try:
-            with Image.open(image_path) as img:
-                img = img.resize(target_size)
-                img.save(output_path, format='JPEG')
-                processed_count += 1
-        except Exception as e:
-            print(f"Error processing {image_name}: {e}")
-    
-    print(f"Processing complete. Processed {processed_count} images.")
+    # Check if all images exist
+    valid_captions = {}
+    for image_id, caption_list in captions.items():
+        image_path = os.path.join(dataset_dir, image_id)
+        if os.path.exists(image_path):
+            valid_captions[image_id] = caption_list
+
+    # Save processed captions to a JSON file
+    with open(output_file, "w") as f:
+        json.dump(valid_captions, f, indent=4)
+
+    print(f"Processed {len(valid_captions)} images with captions.")
+    print(f"Output saved to {output_file}")
 
 if __name__ == "__main__":
-    preprocess_images(DATASET_DIR, OUTPUT_DIR)
+    preprocess_flickr8k(DATASET_DIR, ANNOTATIONS_FILE, OUTPUT_FILE)
