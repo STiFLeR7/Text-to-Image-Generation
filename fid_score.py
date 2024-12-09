@@ -1,88 +1,84 @@
-import torch
-from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
-from PIL import Image
 import os
 import numpy as np
 from scipy.linalg import sqrtm
+from torch.utils.data import DataLoader
+from torchvision import transforms
+import torch
 from tqdm import tqdm
+from PIL import Image
+from torchvision import models
 
-# Custom dataset to load images from a directory without subdirectories
-class CustomImageDataset(Dataset):
-    def __init__(self, image_dir, transform=None):
-        self.image_dir = image_dir
-        self.transform = transform
-        self.image_files = [f for f in os.listdir(image_dir) if f.endswith('.png') or f.endswith('.jpg')]
-
-    def __len__(self):
-        return len(self.image_files)
-
-    def __getitem__(self, idx):
-        image_path = os.path.join(self.image_dir, self.image_files[idx])
-        image = Image.open(image_path).convert("RGB")
-        if self.transform:
-            image = self.transform(image)
-        return image
-
-# Function to get dataloader
-def get_dataloader(image_dir, batch_size=16):  # Reduced batch size
+# Function to extract features (InceptionV3)
+def extract_features(image_paths, model, batch_size=32, device="cpu"):
     transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
+        transforms.Resize((299, 299)),
         transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
-    dataset = CustomImageDataset(image_dir, transform=transform)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
-
-# Function to calculate FID score
-def calculate_fid_score(real_images, generated_images):
-    # Flatten images
-    real_images = real_images.view(real_images.size(0), -1)
-    generated_images = generated_images.view(generated_images.size(0), -1)
     
-    # Compute mean and covariance of real and generated images
-    mu_real = torch.mean(real_images, dim=0)
-    sigma_real = torch.cov(real_images.T)
+    features = []
+    model.eval()
+    with torch.no_grad():
+        for img_path in tqdm(image_paths):
+            img = Image.open(img_path).convert("RGB")
+            img = transform(img).unsqueeze(0).to(device)
+            
+            # Forward pass through InceptionV3
+            output = model(img)
+            features.append(output.cpu().numpy())
+    
+    return np.concatenate(features, axis=0)
 
-    mu_gen = torch.mean(generated_images, dim=0)
-    sigma_gen = torch.cov(generated_images.T)
-
-    # Compute the FID score
+# Function to calculate the FID score
+def calculate_fid(real_features, generated_features):
+    mu_real = np.mean(real_features, axis=0)
+    mu_gen = np.mean(generated_features, axis=0)
+    
+    sigma_real = np.cov(real_features, rowvar=False)
+    sigma_gen = np.cov(generated_features, rowvar=False)
+    
     diff = mu_real - mu_gen
-    covmean, _ = sqrtm(sigma_real @ sigma_gen, disp=False)
-
-    fid = torch.norm(diff) + torch.trace(sigma_real + sigma_gen - 2 * covmean)
-    return fid.item()
-
-# Main function
-if __name__ == "__main__":
-    image_dir = 'enhanced_image'  # Path to enhanced images
-    dataloader = get_dataloader(image_dir)
-
-    # Initialize list to store features
-    real_features = []
-
-    # Extract features from real images in batches
-    for real_images in tqdm(dataloader):
-        real_images = real_images.cuda()  # Move images to GPU
-        real_features.append(real_images)
+    covmean, _ = sqrtm(sigma_real.dot(sigma_gen), disp=False)
     
-    real_features = torch.cat(real_features, dim=0)
+    # Handle the potential complex part of the covariance mean
+    if np.iscomplexobj(covmean):
+        covmean = covmean.real
+    
+    fid = np.sum(diff**2) + np.trace(sigma_real + sigma_gen - 2 * covmean)
+    return fid
 
-    # Now for the generated images, repeat the process similarly
-    generated_image_dir = 'generated_image'
-    generated_dataloader = get_dataloader(generated_image_dir)
+# Function to get the device (CPU or GPU)
+def get_device():
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    generated_features = []
+# Main function to calculate the FID score
+def main():
+    real_images_dir = "enhanced_image"  # Directory with real images
+    generated_images_dir = "generated_image"  # Directory with generated images
 
-    # Extract features from generated images in batches
-    for generated_images in tqdm(generated_dataloader):
-        generated_images = generated_images.cuda()  # Move images to GPU
-        generated_features.append(generated_images)
+    device = get_device()
+    print(f"Using device: {device}")
+    
+    # Load the InceptionV3 model for feature extraction
+    model = models.inception_v3(pretrained=True)
+    model = model.to(device)
+    model.eval()
+    
+    # Get all PNG image paths in the enhanced_images directory
+    real_image_paths = [os.path.join(real_images_dir, fname) for fname in os.listdir(real_images_dir) if fname.endswith('.png')]
+    generated_image_paths = [os.path.join(generated_images_dir, fname) for fname in os.listdir(generated_images_dir) if fname.endswith('.png')]
 
-    generated_features = torch.cat(generated_features, dim=0)
+    print(f"Validating images in directory: {real_images_dir}")
+    real_features = extract_features(real_image_paths, model, device=device)
+    print(f"Extracted features from real images. Shape: {real_features.shape}")
+    
+    print(f"Validating images in directory: {generated_images_dir}")
+    generated_features = extract_features(generated_image_paths, model, device=device)
+    print(f"Extracted features from generated images. Shape: {generated_features.shape}")
+    
+    # Calculate FID score
+    fid_score = calculate_fid(real_features, generated_features)
+    print(f"FID Score: {fid_score}")
 
-    # Calculate FID score between real and generated images
-    fid = calculate_fid_score(real_features, generated_features)
-    print(f"FID Score: {fid}")
+if __name__ == "__main__":
+    main()
