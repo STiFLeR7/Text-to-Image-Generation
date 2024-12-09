@@ -1,109 +1,135 @@
 import torch
-from torch.utils.data import DataLoader, Dataset
-from transformers import CLIPTokenizer, CLIPTextModel
-from diffusers import StableDiffusionPipeline, UNet2DConditionModel, AutoencoderKL, StableDiffusionTrainer
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers import CLIPTextModel, CLIPTokenizer
+from diffusers import StableDiffusionPipeline
+from torch.optim import AdamW
+from torchvision import transforms
+from torch.utils.data import Dataset
 import os
 from PIL import Image
-from tqdm import tqdm
+import json
 
-# Configuration
-DATASET_DIR = "E:/preprocessed_data"  # Path to preprocessed images
-ANNOTATIONS_FILE = "D:/COCO-Dataset/annotations_trainval2014/annotations/captions_train2014.json"
-MODEL_DIR = "CompVis/stable-diffusion-v1-4"  # Pretrained model directory
-OUTPUT_DIR = "./fine_tuned_model"  # Directory to save the fine-tuned model
-BATCH_SIZE = 4
+# Hyperparameters
+BATCH_SIZE = 1  # Reduced batch size to 1
 NUM_EPOCHS = 5
 LEARNING_RATE = 1e-5
+ACCUMULATE_GRADIENTS = 4  # Accumulate gradients over multiple steps if needed
+
+# Directories for saving models and checkpoints
+CHECKPOINT_DIR = "./checkpoints"
+if not os.path.exists(CHECKPOINT_DIR):
+    os.makedirs(CHECKPOINT_DIR)
+
+# Device
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+# Load Stable Diffusion Pipeline
+pipe = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", torch_dtype=torch.float16)
+pipe.to(DEVICE)
 
-# Dataset Definition
-class CustomCocoDataset(Dataset):
-    def __init__(self, image_dir, annotations_file, tokenizer, transform=None):
-        super().__init__()
-        self.image_dir = image_dir
-        self.annotations = self.load_annotations(annotations_file)
-        self.tokenizer = tokenizer
-        self.transform = transform
+# Dataset class to load COCO images and captions
+class MyDataset(Dataset):
+    def __init__(self, image_folder, captions_file):
+        self.image_folder = image_folder
+        self.captions = self.load_captions(captions_file)
+        self.transform = transforms.Compose([
+            transforms.Resize((256, 256)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5])
+        ])
 
-    def load_annotations(self, file_path):
-        import json
-        with open(file_path, "r") as f:
-            data = json.load(f)
-        return data["annotations"]
+    def load_captions(self, captions_file):
+        with open(captions_file, 'r') as file:
+            data = json.load(file)
+        annotations = data['annotations']
+        captions = {}
+        for annotation in annotations:
+            image_id = annotation['image_id']
+            caption = annotation['caption']
+            if image_id not in captions:
+                captions[image_id] = []
+            captions[image_id].append(caption)
+        return captions
 
     def __len__(self):
-        return len(self.annotations)
+        return len(self.captions)
 
     def __getitem__(self, idx):
-        annotation = self.annotations[idx]
-        image_id = annotation["image_id"]
-        caption = annotation["caption"]
-        image_path = os.path.join(self.image_dir, f"processed_COCO_train2014_{image_id:012d}.jpg")
+        # Get the image file name and corresponding caption
+        image_id = list(self.captions.keys())[idx]
+        image_path = os.path.join(self.image_folder, f"COCO_train2014_{image_id:012d}.jpg")
+        caption = self.captions[image_id][0]  # You can change this to sample different captions
 
-        try:
-            image = Image.open(image_path).convert("RGB")
-        except FileNotFoundError:
-            raise ValueError(f"Image not found: {image_path}")
+        # Load and transform the image
+        image = Image.open(image_path).convert('RGB')
+        image = self.transform(image)
 
-        if self.transform:
-            image = self.transform(image)
+        return {'image': image, 'text': caption}
 
-        tokens = self.tokenizer(caption, padding="max_length", truncation=True, max_length=77, return_tensors="pt")
-        return {"image": image, "input_ids": tokens["input_ids"].squeeze(), "attention_mask": tokens["attention_mask"].squeeze()}
+# Path to the dataset
+IMAGE_FOLDER = "D:/COCO-Dataset/train2014/train2014"  # Your image folder path
+CAPTIONS_FILE = "D:/COCO-Dataset/annotations_trainval2014/annotations/captions_train2014.json"  # Your captions file path
 
-
-# Load Dataset
-tokenizer = CLIPTokenizer.from_pretrained(MODEL_DIR)
-dataset = CustomCocoDataset(DATASET_DIR, ANNOTATIONS_FILE, tokenizer)
+# Initialize dataset and dataloader
+dataset = MyDataset(IMAGE_FOLDER, CAPTIONS_FILE)
 dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-# Load Pretrained Model
-pipeline = StableDiffusionPipeline.from_pretrained(MODEL_DIR, torch_dtype=torch.float16)
-vae = pipeline.vae
-unet = pipeline.unet
-text_encoder = pipeline.text_encoder
-vae.to(DEVICE)
-unet.to(DEVICE)
-text_encoder.to(DEVICE)
+# Optimizer for the model components (UNet, VAE, text encoder)
+optimizer = AdamW(
+    list(pipe.unet.parameters()) +
+    list(pipe.vae.parameters()) +
+    list(pipe.text_encoder.parameters()),
+    lr=LEARNING_RATE
+)
 
-# Fine-Tuning Setup
-optimizer = torch.optim.AdamW(unet.parameters(), lr=LEARNING_RATE)
-
-# Fine-Tune Model
-print("Starting fine-tuning...")
-unet.train()
+# Training loop
 for epoch in range(NUM_EPOCHS):
     epoch_loss = 0
-    for batch in tqdm(dataloader, desc=f"Epoch {epoch + 1}/{NUM_EPOCHS}"):
+    pipe.train()  # Set pipeline to training mode
+
+    # Loop over the dataloader with batch_idx to accumulate gradients
+    for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Epoch {epoch + 1}/{NUM_EPOCHS}")):
+        optimizer.zero_grad()
+        
         images = batch["image"].to(DEVICE)
-        input_ids = batch["input_ids"].to(DEVICE)
-        attention_mask = batch["attention_mask"].to(DEVICE)
+        text = batch["text"]
 
-        # Encode text
-        encoder_hidden_states = text_encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+        # Convert text to tokens
+        inputs = pipe.tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=77)
+        input_ids = inputs.input_ids.to(DEVICE)
 
-        # Get VAE latent space
-        latents = vae.encode(images).latent_dist.sample()
-        latents = latents * 0.18215  # Scaling factor
-
-        # Forward pass through UNet
+        # Forward pass
+        latents = pipe.vae.encode(images).latent_dist.sample()
+        latents = latents * 0.18215
         noise = torch.randn_like(latents)
         timesteps = torch.randint(0, 1000, (latents.size(0),), device=DEVICE).long()
         noisy_latents = latents + noise
-        predictions = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+        encoder_hidden_states = pipe.text_encoder(input_ids=input_ids).last_hidden_state
+        predictions = pipe.unet(noisy_latents, timesteps, encoder_hidden_states).sample
 
-        # Loss computation
+        # Compute loss
         loss = torch.nn.functional.mse_loss(predictions, noise)
-        epoch_loss += loss.item()
+        loss = loss / ACCUMULATE_GRADIENTS  # Gradient accumulation
 
         # Backward pass
-        optimizer.zero_grad()
         loss.backward()
-        optimizer.step()
 
+        # Update model after gradient accumulation
+        if (batch_idx + 1) % ACCUMULATE_GRADIENTS == 0:
+            optimizer.step()
+            optimizer.zero_grad()
+
+        epoch_loss += loss.item()
+
+    # Clear CUDA memory after each epoch
+    torch.cuda.empty_cache()  # Clears the GPU memory
+
+    # Print loss for the epoch
     print(f"Epoch {epoch + 1}/{NUM_EPOCHS}, Loss: {epoch_loss / len(dataloader)}")
 
-# Save Fine-Tuned Model
-pipeline.save_pretrained(OUTPUT_DIR)
-print(f"Fine-tuned model saved to {OUTPUT_DIR}")
+    # Save the model checkpoint after each epoch
+    pipe.save_pretrained(os.path.join(CHECKPOINT_DIR, f"stable-diffusion-epoch-{epoch+1}"))
+
+# Optionally save the final model after training is complete
+pipe.save_pretrained(os.path.join(CHECKPOINT_DIR, "stable-diffusion-final"))
