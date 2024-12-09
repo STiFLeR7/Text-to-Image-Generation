@@ -1,138 +1,118 @@
 import torch
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
-from diffusers import StableDiffusionPipeline
+from diffusers import StableDiffusionPipeline, UNet2DConditionModel, AutoencoderKL
+from torch.cuda.amp import autocast, GradScaler
 from torch.optim import AdamW
-from torchvision import transforms
-from torch.utils.data import Dataset
 import os
 from PIL import Image
-import json
+from torchvision import transforms
 
-# Hyperparameters
-BATCH_SIZE = 1  # Reduced batch size to 1
+# Constants
+BATCH_SIZE = 1  # Small batch size for memory efficiency
 NUM_EPOCHS = 5
-LEARNING_RATE = 1e-5
-ACCUMULATE_GRADIENTS = 4  # Accumulate gradients over multiple steps if needed
+LR = 1e-5  # Learning rate
+ACCUMULATE_GRADIENTS = 4  # Gradient accumulation steps
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Directories for saving models and checkpoints
-CHECKPOINT_DIR = "./checkpoints"
-if not os.path.exists(CHECKPOINT_DIR):
-    os.makedirs(CHECKPOINT_DIR)
+# Load components of Stable Diffusion
+pipeline = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", revision="fp16", torch_dtype=torch.float16)
+vae = pipeline.vae.to(DEVICE)
+text_encoder = pipeline.text_encoder.to(DEVICE)
+tokenizer = pipeline.tokenizer
+unet = pipeline.unet.to(DEVICE)
 
-# Device
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Optimizer for UNet
+optimizer = AdamW(unet.parameters(), lr=LR)
 
-# Load Stable Diffusion Pipeline
-pipe = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", torch_dtype=torch.float16)
-pipe.to(DEVICE)
+# Gradient scaler for mixed precision
+scaler = GradScaler()
 
-# Dataset class to load COCO images and captions
-class MyDataset(Dataset):
-    def __init__(self, image_folder, captions_file):
-        self.image_folder = image_folder
-        self.captions = self.load_captions(captions_file)
-        self.transform = transforms.Compose([
-            transforms.Resize((256, 256)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5])
-        ])
+# Image preprocessing
+transform = transforms.Compose([
+    transforms.Resize((256, 256)),  # Resize images to save memory
+    transforms.ToTensor(),
+    transforms.Normalize([0.5], [0.5])  # Normalize to [-1, 1]
+])
 
-    def load_captions(self, captions_file):
-        with open(captions_file, 'r') as file:
-            data = json.load(file)
-        annotations = data['annotations']
-        captions = {}
-        for annotation in annotations:
-            image_id = annotation['image_id']
-            caption = annotation['caption']
-            if image_id not in captions:
-                captions[image_id] = []
-            captions[image_id].append(caption)
-        return captions
+# Load dataset
+def load_dataset(dataset_dir):
+    image_paths = []
+    for root, _, files in os.walk(dataset_dir):
+        for file in files:
+            if file.endswith('.jpg') or file.endswith('.png'):
+                image_paths.append(os.path.join(root, file))
+    return image_paths
 
+# Custom Dataset
+class CustomDataset(torch.utils.data.Dataset):
+    def __init__(self, image_paths, transform=None):
+        self.image_paths = image_paths
+        self.transform = transform
+    
     def __len__(self):
-        return len(self.captions)
-
+        return len(self.image_paths)
+    
     def __getitem__(self, idx):
-        # Get the image file name and corresponding caption
-        image_id = list(self.captions.keys())[idx]
-        image_path = os.path.join(self.image_folder, f"COCO_train2014_{image_id:012d}.jpg")
-        caption = self.captions[image_id][0]  # You can change this to sample different captions
+        image_path = self.image_paths[idx]
+        image = Image.open(image_path).convert("RGB")
+        if self.transform:
+            image = self.transform(image)
+        return {"image": image, "text": "sample caption"}  # Replace with actual captions
 
-        # Load and transform the image
-        image = Image.open(image_path).convert('RGB')
-        image = self.transform(image)
-
-        return {'image': image, 'text': caption}
-
-# Path to the dataset
-IMAGE_FOLDER = "D:/COCO-Dataset/train2014/train2014"  # Your image folder path
-CAPTIONS_FILE = "D:/COCO-Dataset/annotations_trainval2014/annotations/captions_train2014.json"  # Your captions file path
-
-# Initialize dataset and dataloader
-dataset = MyDataset(IMAGE_FOLDER, CAPTIONS_FILE)
-dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-
-# Optimizer for the model components (UNet, VAE, text encoder)
-optimizer = AdamW(
-    list(pipe.unet.parameters()) +
-    list(pipe.vae.parameters()) +
-    list(pipe.text_encoder.parameters()),
-    lr=LEARNING_RATE
-)
+# Dataset directory
+dataset_dir = "D:/COCO-Dataset/train2014/train2014"
+image_paths = load_dataset(dataset_dir)
+dataset = CustomDataset(image_paths, transform)
+dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
 
 # Training loop
 for epoch in range(NUM_EPOCHS):
+    unet.train()
     epoch_loss = 0
-    # Set the components to training mode
-    pipe.unet.train()
-    pipe.vae.train()
-    pipe.text_encoder.train()
+    for batch_idx, batch in enumerate(dataloader):
+        images = batch["image"].to(DEVICE).half()  # Convert to float16
+        texts = batch["text"]
 
-    # Loop over the dataloader with batch_idx to accumulate gradients
-    for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Epoch {epoch + 1}/{NUM_EPOCHS}")):
-        optimizer.zero_grad()
-        
-        images = batch["image"].to(DEVICE)
-        text = batch["text"]
+        # Tokenize text
+        text_inputs = tokenizer(texts, padding="max_length", max_length=77, return_tensors="pt", truncation=True)
+        input_ids = text_inputs.input_ids.to(DEVICE)
 
-        # Convert text to tokens
-        inputs = pipe.tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=77)
-        input_ids = inputs.input_ids.to(DEVICE)
+        # Encode text
+        encoder_hidden_states = text_encoder(input_ids)[0]
 
-        # Forward pass
-        latents = pipe.vae.encode(images).latent_dist.sample()
-        latents = latents * 0.18215
+        # Encode images into latents
+        latents = vae.encode(images).latent_dist.sample() * 0.18215
+
+        # Add noise to latents
         noise = torch.randn_like(latents)
         timesteps = torch.randint(0, 1000, (latents.size(0),), device=DEVICE).long()
         noisy_latents = latents + noise
-        encoder_hidden_states = pipe.text_encoder(input_ids=input_ids).last_hidden_state
-        predictions = pipe.unet(noisy_latents, timesteps, encoder_hidden_states).sample
 
-        # Compute loss
-        loss = torch.nn.functional.mse_loss(predictions, noise)
-        loss = loss / ACCUMULATE_GRADIENTS  # Gradient accumulation
+        # Predict noise using UNet
+        with autocast():
+            noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+            loss = torch.nn.functional.mse_loss(noise_pred, noise)
 
-        # Backward pass
-        loss.backward()
-
-        # Update model after gradient accumulation
+        # Backpropagation with gradient accumulation
+        scaler.scale(loss).backward()
         if (batch_idx + 1) % ACCUMULATE_GRADIENTS == 0:
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             optimizer.zero_grad()
 
         epoch_loss += loss.item()
+        if batch_idx % 100 == 0:
+            print(f"Batch {batch_idx}/{len(dataloader)} - Loss: {loss.item()}")
 
-    # Clear CUDA memory after each epoch
-    torch.cuda.empty_cache()  # Clears the GPU memory
+    print(f"Epoch {epoch + 1}/{NUM_EPOCHS} - Average Loss: {epoch_loss / len(dataloader)}")
 
-    # Print loss for the epoch
-    print(f"Epoch {epoch + 1}/{NUM_EPOCHS}, Loss: {epoch_loss / len(dataloader)}")
+    # Save model checkpoint after each epoch
+    save_path = f"fine_tuned_model/epoch_{epoch + 1}"
+    os.makedirs(save_path, exist_ok=True)
+    unet.save_pretrained(save_path)
 
-    # Save the model checkpoint after each epoch
-    pipe.save_pretrained(os.path.join(CHECKPOINT_DIR, f"stable-diffusion-epoch-{epoch+1}"))
+    # Clear GPU memory
+    torch.cuda.empty_cache()
 
-# Optionally save the final model after training is complete
-pipe.save_pretrained(os.path.join(CHECKPOINT_DIR, "stable-diffusion-final"))
+print("Fine-tuning complete.")
