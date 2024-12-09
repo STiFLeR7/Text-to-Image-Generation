@@ -95,7 +95,7 @@ def calculate_inception_score(dataloader, splits=10):
 # Main execution function
 if __name__ == "__main__":
     # Define the directory for images
-    image_dir = "enhanced_images"  # Update this path if needed
+    image_dir = "enhanced_image"  # Update this path if needed
 
     # Step 1: Validate Images
     validate_images(image_dir)
