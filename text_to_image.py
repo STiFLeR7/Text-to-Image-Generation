@@ -1,74 +1,73 @@
 import os
-import torch
-from transformers import CLIPTextModel, CLIPTokenizer
 from diffusers import StableDiffusionPipeline
+import torch
+from realesrgan import RealESRGAN
 from PIL import Image
-import matplotlib.pyplot as plt
-import numpy as np
-import cv2
+import shutil
 
-# Ensure old images are deleted before new ones are generated
-def clear_old_images():
-    # Delete old images from generated_image, enhanced_image, and comparison_image folders
-    generated_folder = "generated_image"
-    enhanced_folder = "enhanced_image"
-    comparison_folder = "comparison_image"
-    
-    for folder in [generated_folder, enhanced_folder, comparison_folder]:
-        if not os.path.exists(folder):
-            os.makedirs(folder)  # Create folder if it doesn't exist
-        for file in os.listdir(folder):
-            file_path = os.path.join(folder, file)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
+# Set up directories
+generated_dir = "generated_images"
+enhanced_dir = "enhanced_images"
+comparison_dir = "comparison_images"
 
-# Load pretrained model and tokenizer from Hugging Face
-pipe = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", torch_dtype=torch.float16)
-pipe.to("cuda")  # Move model to GPU for faster processing
+# Create directories if they don't exist
+os.makedirs(generated_dir, exist_ok=True)
+os.makedirs(enhanced_dir, exist_ok=True)
+os.makedirs(comparison_dir, exist_ok=True)
 
-# Function to generate an image from a text prompt
-def generate_image_from_text(prompt: str):
-    with torch.no_grad():
-        image = pipe(prompt).images[0]
+# Load the Stable Diffusion model (Stable Diffusion 2.1)
+model_id = "stabilityai/stable-diffusion-2-1-base"
+pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
+pipe.to("cuda")
+
+# Load Real-ESRGAN for enhancing images
+esrgan = RealESRGAN.from_pretrained('RealESRGAN_x4', device='cuda')
+esrgan.to('cuda')
+
+# Function to generate image from a text prompt
+def generate_image(prompt, output_path="generated_images/image.png"):
+    print(f"Generating image for prompt: {prompt}")
+    image = pipe(prompt).images[0]
+    image.save(output_path)
+    print(f"Image saved to {output_path}")
     return image
 
-# Function to save and display generated image
-def save_and_display_image(image: Image.Image, filename: str):
-    image.save(filename)
-    plt.imshow(image)
-    plt.axis("off")
-    plt.show()
+# Function to enhance an image using Real-ESRGAN
+def enhance_image(input_image_path, output_image_path="enhanced_images/image.png"):
+    print(f"Enhancing image: {input_image_path}")
+    image = Image.open(input_image_path).convert("RGB")
+    enhanced_image = esrgan.enhance(image)
+    enhanced_image.save(output_image_path)
+    print(f"Enhanced image saved to {output_image_path}")
+    return enhanced_image
 
-# Function to enhance image resolution (optional post-processing)
-def enhance_image(image_path: str):
-    img = cv2.imread(image_path)
-    enhanced_img = cv2.resize(img, (img.shape[1] * 2, img.shape[0] * 2), interpolation=cv2.INTER_CUBIC)
-    enhanced_pil_img = Image.fromarray(enhanced_img)
-    return enhanced_pil_img
+# Function to generate a comparison between the original and enhanced images
+def create_comparison(original_image_path, enhanced_image_path, comparison_image_path="comparison_images/comparison.png"):
+    print(f"Creating comparison image: {comparison_image_path}")
+    original = Image.open(original_image_path)
+    enhanced = Image.open(enhanced_image_path)
 
-# Function to compare multiple outputs by generating 5 variations of the same prompt
-def compare_multiple_outputs(prompt: str, num_samples=5):
-    comparison_images = []
-    for i in range(num_samples):
-        comparison_image = generate_image_from_text(prompt)
-        comparison_image.save(f"comparison_image/image_{i+1}.png")
-        comparison_images.append(comparison_image)
-    return comparison_images
+    # Resize images for comparison (if necessary)
+    enhanced = enhanced.resize(original.size)
 
-# Clear old images from previous runs
-clear_old_images()
+    # Combine images side by side
+    comparison = Image.new('RGB', (original.width + enhanced.width, original.height))
+    comparison.paste(original, (0, 0))
+    comparison.paste(enhanced, (original.width, 0))
+    
+    comparison.save(comparison_image_path)
+    print(f"Comparison image saved to {comparison_image_path}")
+    return comparison
 
-# Generate 15 images for a given prompt
-prompt = "A futuristic city at sunset with flying cars."
-for i in range(15):
-    generated_image = generate_image_from_text(prompt)
-    generated_image.save(f"generated_image/generated_image_{i+1}.png")
-    save_and_display_image(generated_image, f"generated_image/generated_image_{i+1}.png")
+# Example usage
+if __name__ == "__main__":
+    prompt = "A futuristic city with flying cars and neon lights"
 
-    # Enhance and save the image
-    enhanced_image = enhance_image(f"generated_image/generated_image_{i+1}.png")
-    enhanced_image.save(f"enhanced_image/enhanced_image_{i+1}.png")
-    save_and_display_image(enhanced_image, f"enhanced_image/enhanced_image_{i+1}.png")
+    # Generate image
+    generated_image = generate_image(prompt, os.path.join(generated_dir, "futuristic_city.png"))
 
-# Compare multiple outputs (5 variations)
-compare_multiple_outputs("A beautiful forest landscape at dawn", num_samples=5)
+    # Enhance the generated image using Real-ESRGAN
+    enhanced_image = enhance_image(os.path.join(generated_dir, "futuristic_city.png"), os.path.join(enhanced_dir, "futuristic_city_enhanced.png"))
+
+    # Create a comparison image between original and enhanced
+    create_comparison(os.path.join(generated_dir, "futuristic_city.png"), os.path.join(enhanced_dir, "futuristic_city_enhanced.png"), os.path.join(comparison_dir, "futuristic_city_comparison.png"))
