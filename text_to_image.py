@@ -1,73 +1,64 @@
-import os
-from diffusers import StableDiffusionPipeline
 import torch
+from transformers import pipeline
 from realesrgan import RealESRGANer
 from PIL import Image
-import shutil
+import os
 
-# Set up directories
-generated_dir = "generated_images"
-enhanced_dir = "enhanced_images"
-comparison_dir = "comparison_images"
+# Paths to save images
+GENERATED_IMAGES_PATH = 'generated_images'
+ENHANCED_IMAGES_PATH = 'enhanced_images'
+COMPARISON_IMAGES_PATH = 'comparison_images'
 
-# Create directories if they don't exist
-os.makedirs(generated_dir, exist_ok=True)
-os.makedirs(enhanced_dir, exist_ok=True)
-os.makedirs(comparison_dir, exist_ok=True)
+# Ensure the output directories exist
+os.makedirs(GENERATED_IMAGES_PATH, exist_ok=True)
+os.makedirs(ENHANCED_IMAGES_PATH, exist_ok=True)
+os.makedirs(COMPARISON_IMAGES_PATH, exist_ok=True)
 
-# Load the Stable Diffusion model (Stable Diffusion 2.1)
-model_id = "stabilityai/stable-diffusion-2-1-base"
-pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
-pipe.to("cuda")
+# Authenticate Hugging Face if needed (uncomment and replace YOUR_TOKEN if required)
+# from huggingface_hub import login
+# login(token="YOUR_HUGGINGFACE_TOKEN")
 
-# Load Real-ESRGAN for enhancing images
-esrgan = RealESRGANer.from_pretrained('RealESRGAN_x4', device='cuda')
-esrgan.to('cuda')
+# Load Stable Diffusion v2.1 model
+generator = pipeline("text-to-image", model="stabilityai/stable-diffusion-2-1")
 
-# Function to generate image from a text prompt
-def generate_image(prompt, output_path="generated_images/image.png"):
-    print(f"Generating image for prompt: {prompt}")
-    image = pipe(prompt).images[0]
+# Define function to generate image
+def generate_image(prompt, output_path):
+    image = generator(prompt, height=512, width=512)[0]["image"]
     image.save(output_path)
-    print(f"Image saved to {output_path}")
+    print(f"Generated image saved at {output_path}")
     return image
 
-# Function to enhance an image using Real-ESRGAN
-def enhance_image(input_image_path, output_image_path="enhanced_images/image.png"):
-    print(f"Enhancing image: {input_image_path}")
-    image = Image.open(input_image_path).convert("RGB")
-    enhanced_image = esrgan.enhance(image)
-    enhanced_image.save(output_image_path)
-    print(f"Enhanced image saved to {output_image_path}")
-    return enhanced_image
+# Load RealESRGAN model (ensure it's pre-trained)
+real_esrgan_model = RealESRGANer(
+    scale=4, 
+    model_path="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.3.0/RealESRGAN_x4plus.pth", 
+    device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+)
 
-# Function to generate a comparison between the original and enhanced images
-def create_comparison(original_image_path, enhanced_image_path, comparison_image_path="comparison_images/comparison.png"):
-    print(f"Creating comparison image: {comparison_image_path}")
-    original = Image.open(original_image_path)
-    enhanced = Image.open(enhanced_image_path)
+# Function to enhance image using RealESRGANer
+def enhance_image(input_image_path, output_path):
+    img = Image.open(input_image_path).convert("RGB")
+    enhanced_img, _ = real_esrgan_model.enhance(img)
+    enhanced_img.save(output_path)
+    print(f"Enhanced image saved at {output_path}")
+    return enhanced_img
 
-    # Resize images for comparison (if necessary)
-    enhanced = enhanced.resize(original.size)
+# Example: Generate and enhance image
+prompt = "A futuristic cityscape at night"
+generated_image_path = os.path.join(GENERATED_IMAGES_PATH, "generated_image.jpg")
+enhanced_image_path = os.path.join(ENHANCED_IMAGES_PATH, "enhanced_image.jpg")
+comparison_image_path = os.path.join(COMPARISON_IMAGES_PATH, "comparison_image.jpg")
 
-    # Combine images side by side
-    comparison = Image.new('RGB', (original.width + enhanced.width, original.height))
-    comparison.paste(original, (0, 0))
-    comparison.paste(enhanced, (original.width, 0))
-    
-    comparison.save(comparison_image_path)
-    print(f"Comparison image saved to {comparison_image_path}")
-    return comparison
+# Step 1: Generate image from text
+generated_image = generate_image(prompt, generated_image_path)
 
-# Example usage
-if __name__ == "__main__":
-    prompt = "A futuristic city with flying cars and neon lights"
+# Step 2: Enhance the generated image using RealESRGANer
+enhanced_image = enhance_image(generated_image_path, enhanced_image_path)
 
-    # Generate image
-    generated_image = generate_image(prompt, os.path.join(generated_dir, "futuristic_city.png"))
+# Optional: Save comparison image (side by side)
+comparison_image = Image.new('RGB', (generated_image.width * 2, generated_image.height))
+comparison_image.paste(generated_image, (0, 0))
+comparison_image.paste(enhanced_image, (generated_image.width, 0))
+comparison_image.save(comparison_image_path)
 
-    # Enhance the generated image using Real-ESRGAN
-    enhanced_image = enhance_image(os.path.join(generated_dir, "futuristic_city.png"), os.path.join(enhanced_dir, "futuristic_city_enhanced.png"))
-
-    # Create a comparison image between original and enhanced
-    create_comparison(os.path.join(generated_dir, "futuristic_city.png"), os.path.join(enhanced_dir, "futuristic_city_enhanced.png"), os.path.join(comparison_dir, "futuristic_city_comparison.png"))
+print("Process complete!")
