@@ -32,7 +32,7 @@ def automate_repo():
 scheduler = BlockingScheduler()
 
 # Schedule the task to run daily at 9:00 AM
-scheduler.add_job(automate_repo, "cron", hour=11, minute=46)
+scheduler.add_job(automate_repo, "cron", hour=11, minute=49)
 
 print("[INFO] Scheduler started. Waiting for the scheduled time...")
 scheduler.start()
