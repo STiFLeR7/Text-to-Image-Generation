@@ -6,5 +6,6 @@ opencv-python
 pillow
 matplotlib
 pytorch-fid
+torchmetrics
 tensorflow
 realesrgan
