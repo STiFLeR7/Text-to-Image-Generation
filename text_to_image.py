@@ -3,7 +3,7 @@ import argparse
 from PIL import Image
 import torch
 from diffusers import StableDiffusionPipeline
-from realesrgan import RealESRGAN
+from realesrgan import RealESRGANer
 from realesrgan.archs.srvgg_arch import SRVGGNetCompact
 from torchmetrics.image.fid import FrechetInceptionDistance
 
@@ -30,7 +30,7 @@ def load_real_esrgan(enhancer_checkpoint):
     """Load Real-ESRGAN model for image enhancement."""
     print(f"Loading Real-ESRGAN model from {enhancer_checkpoint}")
     model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4, act_type='prelu')
-    enhancer = RealESRGAN("cuda", model=model, scale=4)
+    enhancer = RealESRGANer("cuda", model=model, scale=4)
     enhancer.load_weights(enhancer_checkpoint)
     return enhancer
 
