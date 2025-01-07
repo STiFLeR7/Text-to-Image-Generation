@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import argparse
 from PIL import Image
 import torch
@@ -43,18 +44,26 @@ def enhance_images():
         enhanced_img.save(enhanced_img_path)
 
 def calculate_fid(generated_path, real_path):
+    """Calculate FID score."""
     fid = FrechetInceptionDistance()
     for img_file in os.listdir(generated_path):
         img_path = os.path.join(generated_path, img_file)
         img = Image.open(img_path).convert("RGB")
-        fid.update(torch.tensor(img).permute(2, 0, 1).unsqueeze(0), real=False)
+        img_tensor = torch.tensor(
+            np.array(img), dtype=torch.float32
+        ).permute(2, 0, 1).unsqueeze(0) / 255.0  # Normalize to [0, 1]
+        fid.update(img_tensor, real=False)
 
     for img_file in os.listdir(real_path):
         img_path = os.path.join(real_path, img_file)
         img = Image.open(img_path).convert("RGB")
-        fid.update(torch.tensor(img).permute(2, 0, 1).unsqueeze(0), real=True)
+        img_tensor = torch.tensor(
+            np.array(img), dtype=torch.float32
+        ).permute(2, 0, 1).unsqueeze(0) / 255.0  # Normalize to [0, 1]
+        fid.update(img_tensor, real=True)
 
     return fid.compute()
+
 
 def main(args):
     ensure_directories()
