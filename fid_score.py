@@ -59,8 +59,8 @@ def get_device():
 
 # Main function to calculate the FID score
 def main():
-    real_images_dir = "enhanced_image"  # Directory with real images
-    generated_images_dir = "generated_image"  # Directory with generated images
+    real_images_dir = "enhanced_images"  # Directory with real images
+    generated_images_dir = "generated_images"  # Directory with generated images
 
     device = get_device()
     print(f"Using device: {device}")
