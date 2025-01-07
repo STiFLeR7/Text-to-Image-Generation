@@ -13,21 +13,18 @@ TEXT_PATH = "D:/Flickr8k-Dataset/Flickr8k_text"
 GENERATED_IMAGES_PATH = "./generated_images"
 ENHANCED_IMAGES_PATH = "./enhanced_images"
 
-
 def ensure_directories():
     """Ensure all necessary directories exist."""
     os.makedirs(GENERATED_IMAGES_PATH, exist_ok=True)
     os.makedirs(ENHANCED_IMAGES_PATH, exist_ok=True)
 
-
 def load_stable_diffusion(model_name="stabilityai/stable-diffusion-2-1"):
     """Load Stable Diffusion pipeline from Hugging Face."""
     print(f"Loading Stable Diffusion model {model_name} from Hugging Face")
     pipe = StableDiffusionPipeline.from_pretrained(
-        model_name, torch_dtype="float16"
+        model_name, torch_dtype=torch.float16
     ).to("cuda")
     return pipe
-
 
 def load_real_esrgan(enhancer_checkpoint):
     """Load Real-ESRGAN model for image enhancement."""
@@ -39,7 +36,6 @@ def load_real_esrgan(enhancer_checkpoint):
     enhancer.load_weights(enhancer_checkpoint)
     return enhancer
 
-
 def generate_images(pipe, captions, num_images=5):
     """Generate images from text captions."""
     for i, caption in enumerate(captions):
@@ -47,7 +43,6 @@ def generate_images(pipe, captions, num_images=5):
         for j in range(num_images):
             image = pipe(caption).images[0]
             image.save(os.path.join(GENERATED_IMAGES_PATH, f"image_{i}_{j}.png"))
-
 
 def enhance_images(enhancer):
     """Enhance images using RealESRGAN."""
@@ -58,22 +53,20 @@ def enhance_images(enhancer):
         enhanced_img = enhancer.enhance(img)
         enhanced_img.save(enhanced_img_path)
 
-
 def calculate_fid(generated_path, real_path):
     """Calculate FID score."""
     fid = FrechetInceptionDistance()
     for img_file in os.listdir(generated_path):
         img_path = os.path.join(generated_path, img_file)
         img = Image.open(img_path).convert("RGB")
-        fid.update(img, real=False)
+        fid.update(torch.tensor(img).permute(2, 0, 1).unsqueeze(0), real=False)
 
     for img_file in os.listdir(real_path):
         img_path = os.path.join(real_path, img_file)
         img = Image.open(img_path).convert("RGB")
-        fid.update(img, real=True)
+        fid.update(torch.tensor(img).permute(2, 0, 1).unsqueeze(0), real=True)
 
     return fid.compute()
-
 
 def main(args):
     ensure_directories()
@@ -95,7 +88,6 @@ def main(args):
     # Calculate FID score
     fid_score = calculate_fid(GENERATED_IMAGES_PATH, DATASET_PATH)
     print(f"FID Score: {fid_score}")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Text-to-Image Generation Project")
