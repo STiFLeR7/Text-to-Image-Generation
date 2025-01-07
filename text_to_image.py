@@ -13,12 +13,10 @@ GENERATED_IMAGES_PATH = "./generated_images"
 ENHANCED_IMAGES_PATH = "./enhanced_images"
 
 def ensure_directories():
-    """Ensure all necessary directories exist."""
     os.makedirs(GENERATED_IMAGES_PATH, exist_ok=True)
     os.makedirs(ENHANCED_IMAGES_PATH, exist_ok=True)
 
 def load_stable_diffusion(model_name="stabilityai/stable-diffusion-2-1"):
-    """Load Stable Diffusion pipeline from Hugging Face."""
     print(f"Loading Stable Diffusion model {model_name} from Hugging Face")
     pipe = StableDiffusionPipeline.from_pretrained(
         model_name, torch_dtype=torch.float16
@@ -26,12 +24,10 @@ def load_stable_diffusion(model_name="stabilityai/stable-diffusion-2-1"):
     return pipe
 
 def enhance_image(image):
-    """Dummy enhancement process using grayscale conversion."""
     print("Enhancing image...")
     return rgb_to_grayscale(image)
 
 def generate_images(pipe, captions, num_images=5):
-    """Generate images from text captions."""
     for i, caption in enumerate(captions):
         print(f"Generating images for caption {i+1}/{len(captions)}: '{caption}'")
         for j in range(num_images):
@@ -39,7 +35,6 @@ def generate_images(pipe, captions, num_images=5):
             image.save(os.path.join(GENERATED_IMAGES_PATH, f"image_{i}_{j}.png"))
 
 def enhance_images():
-    """Enhance images using a simple process."""
     for img_file in os.listdir(GENERATED_IMAGES_PATH):
         img_path = os.path.join(GENERATED_IMAGES_PATH, img_file)
         enhanced_img_path = os.path.join(ENHANCED_IMAGES_PATH, img_file)
@@ -48,7 +43,6 @@ def enhance_images():
         enhanced_img.save(enhanced_img_path)
 
 def calculate_fid(generated_path, real_path):
-    """Calculate FID score."""
     fid = FrechetInceptionDistance()
     for img_file in os.listdir(generated_path):
         img_path = os.path.join(generated_path, img_file)
