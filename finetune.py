@@ -1,98 +1,62 @@
-from diffusers import StableDiffusionPipeline
-from torch.utils.data import Dataset, DataLoader
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-import torch
 import os
-from PIL import Image
-from tqdm import tqdm
+import torch
 
-# Dataset Preparation
-class Flickr8kDataset(Dataset):
-    def __init__(self, image_dir, captions_file, tokenizer, image_size=(512, 512)):
-        self.image_dir = image_dir
-        self.tokenizer = tokenizer
-        self.image_size = image_size
-        self.data = []
+# Define paths
+image_folder = "D:/Flickr8k-Dataset/Images"  # Path to the folder containing images
+dataset_file = "D:/Flickr8k-Dataset/captions.txt"  # Path to captions.txt
 
-        # Read captions file
-        with open(dataset_file, "r") as f:
-            for line in f:
-                # Split into image filename and caption
-                parts = line.strip().split(" ", 1)  # Split at the first space
-                if len(parts) != 2:
-                    print(f"Skipping invalid line: {line.strip()}")  # Debugging
+# Check if paths exist
+if not os.path.exists(image_folder):
+    raise FileNotFoundError(f"Image folder not found: {image_folder}")
+
+if not os.path.exists(dataset_file):
+    raise FileNotFoundError(f"Dataset file not found: {dataset_file}")
+
+# Process captions.txt
+def process_dataset(image_folder, dataset_file):
+    dataset = []
+    with open(dataset_file, "r") as f:
+        for line_num, line in enumerate(f, start=1):
+            # Split the line into image filename and caption using the dot as a separator
+            parts = line.strip().split(".", 1)  # Split at the first dot
+            if len(parts) != 2:
+                print(f"[Warning] Skipping invalid line {line_num}: {line.strip()}")
                 continue
+
             image_filename, caption = parts
-            print(f"Image: {image_filename}, Caption: {caption}")  # Debugging
+            image_filename = image_filename.strip() + ".jpg"  # Ensure the filename ends with ".jpg"
+            image_path = os.path.join(image_folder, image_filename)
 
+            # Check if the image exists
+            if not os.path.exists(image_path):
+                print(f"[Warning] Image not found: {image_filename}, skipping...")
+                continue
 
-    def __len__(self):
-        return len(self.data)
+            # Add valid image-caption pair to the dataset
+            dataset.append((image_path, caption.strip()))
 
-    def __getitem__(self, idx):
-        image_name, caption = self.data[idx]
-        image_path = os.path.join(self.image_dir, image_name)
+    return dataset
 
-        # Load and preprocess image
-        image = Image.open(image_path).convert("RGB")
-        image = image.resize(self.image_size)
+# Load dataset
+dataset = process_dataset(image_folder, dataset_file)
 
-        # Tokenize caption
-        tokens = self.tokenizer(
-            caption,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt"
-        )
+if len(dataset) == 0:
+    raise ValueError("No valid image-caption pairs found. Check your dataset.")
 
-        return {
-            "pixel_values": torch.tensor(image).permute(2, 0, 1) / 255.0,
-            "input_ids": tokens.input_ids.squeeze(),
-            "attention_mask": tokens.attention_mask.squeeze()
-        }
+print(f"Loaded {len(dataset)} image-caption pairs.")
 
-# Initialize tokenizer
-tokenizer = AutoTokenizer.from_pretrained("t5-base")
+# Fine-tuning model logic here
+# Placeholder: Replace with actual fine-tuning code for your ML model
+def finetune_model(dataset):
+    # Example processing loop for dataset
+    for image_path, caption in dataset:
+        # Debugging: Print each pair
+        print(f"Processing Image: {image_path}, Caption: {caption}")
 
-# Dataset and Dataloader
-image_dir = "D:/Flickr8k-Dataset/Images"
-captions_file = r"D:/Flickr8k-Dataset/captions.txt"
-dataset = Flickr8kDataset(image_dir, captions_file, tokenizer)
-dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
+        # Your fine-tuning code would go here
+        pass
 
-# Load Stable Diffusion Model
-model = StableDiffusionPipeline.from_pretrained("stabilityai/stable-diffusion-2-1")
-model.to("cuda")
-
-# Training Loop
-optimizer = torch.optim.AdamW(model.unet.parameters(), lr=5e-5)
-epochs = 5
-
-for epoch in range(epochs):
-    print(f"Epoch {epoch + 1}/{epochs}")
-    for batch in tqdm(dataloader):
-        pixel_values = batch["pixel_values"].to("cuda")
-        input_ids = batch["input_ids"].to("cuda")
-        attention_mask = batch["attention_mask"].to("cuda")
-
-        # Forward pass
-        loss = model(pixel_values, input_ids, attention_mask).loss
-
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-    print(f"Loss: {loss.item()}")
-
-# Save Fine-Tuned Model
-model.save_pretrained("fine_tuned_stable_diffusion")
-
-# Testing the Fine-Tuned Model
-
-fine_tuned_model = StableDiffusionPipeline.from_pretrained("fine_tuned_stable_diffusion")
-fine_tuned_model.to("cuda")
-
-prompt = "A beautiful day in the park."
-image = fine_tuned_model(prompt).images[0]
-image.show()
+# Start fine-tuning
+print("Starting fine-tuning...")
+finetune_model(dataset)
+print("Fine-tuning complete!")
