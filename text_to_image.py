@@ -10,8 +10,8 @@ import numpy as np
 from tqdm import tqdm
 
 # Directories
-DATASET_PATH = "D:/Flickr8k-Dataset/Flicker8k_Dataset"
-TEXT_PATH = "D:/Flickr8k-Dataset/Flickr8k_text"
+DATASET_PATH = "D:/Flickr8k-Dataset/Images"
+TEXT_PATH = "D:/Flickr8k-Dataset/captions.txt"
 GENERATED_IMAGES_PATH = "./generated_images"
 ENHANCED_IMAGES_PATH = "./enhanced_images"
 
